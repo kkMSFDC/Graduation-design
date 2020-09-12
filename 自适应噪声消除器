@@ -1,0 +1,513 @@
+
+%% =============== 
+%回波数据生成模块
+%====================
+clear all;close all;clc
+%% 获取文件
+load AD_LPF_100_625MHz;  %截止频率6.25MHz
+
+%% 初始化可选择的参数
+isJam = 1;               %1表示添加干扰，0不添加干扰
+isMultipath = 0;         %1表示考虑多路径，0表示不考虑，考虑多路径的时候默认只考虑第一个目标存在反射，一次直径射，一次非直径射
+Mode = 'SIMO';           %SIMO模式、MIMO模式两种，MIMO为两发射
+Wave_mode = 'FMCW';        % 'FMCW' 调频连续波  ‘triangle’三角波  ‘SF’步进频（其中FMCW支持目标跟踪，另外两个模型只考虑现象）
+
+isSignallinear = 1;      % 0非理想因素，1理想的信号 (条件内0或1不用更改)
+if  isSignallinear
+    Choice.isRPattern_ideal = 1;  %1表示理想的接收方向图，0表示实测数据获得的接收方向图
+    Choice.isTPattern_ideal = 1;  %1表示理想的发射方向图，0表示实测数据获得的发射方向图
+    Choice.isidealTpwr_vary_f = 1;   %1表示发射模功率恒定，不随着功率变化；0表示发射功率随功率变化
+    Choice.isidealKr_vary_f = 1;   %1表示调频斜率恒定，不随着功率变化；0表示调频斜率随功率变化
+    Choice.isidealIFG_vary_f = 1;  %1表示中频增益恒定，0表示中频增益随功率变化，中频增益把所有级的放大增益合在一起
+    AmpPhaseErr = 0;                %表示1加幅相误差 0表示不添加
+else
+    Choice.isRPattern_ideal = 1;  %1表示理想的接收方向图，0表示实测数据获得的接收方向图
+    Choice.isTPattern_ideal = 1;  %1表示理想的发射方向图，0表示实测数据获得的发射方向图
+    Choice.isidealTpwr_vary_f = 0;   %1表示发射模功率恒定，不随着功率变化；0表示发射功率随功率变化
+    Choice.isidealKr_vary_f = 0;   %1表示调频斜率恒定，不随着功率变化；0表示调频斜率随功率变化
+    Choice.isidealIFG_vary_f = 0;  %1表示中频增益恒定，0表示中频增益随功率变化，中频增益把所有级的放大增益合在一起   
+    AmpPhaseErr = 1;               %表示1加幅相误差 0表示不添加
+end
+
+%% 多径参数
+Scene.mp_wallOrGround = 0 ;% 墙反射(=0) 地面反射(=1)
+Scene.mp_street_width = 50;          %假设自车处于街道中央，50m    
+Scene.mp_RCS = 1e1;
+Scene.mp_reflect_pos_r = 0.5;       %反射点的纵向位置（0.5为距离比例，越接近0越接近自车）
+Scene.mp_reflect_pos_high = 1;    %反射点位置，即车辆高度（假设 0 为车辆高度，负为向地面）
+
+%% 波形参数和天线参数
+frame_num = 1;   % 记录生成的帧数据个数
+band = 150e6;    % 初始带宽
+fs = 100e6;      % 模拟信号采样频域（要与低通滤波器关联）
+prt = 50e-6;     % prt时间
+prt_num = 512;   % 一帧内prt个数
+[SysPara Antenna Jam] = func_signal_para(band,fs,prt,prt_num,Mode);  %生成波形参数矩阵、射频参数矩阵、干扰参数矩阵
+
+SysPara.distance_attenuation = 1;%   调试过程中的参量，是否考虑幅度因素，1表示考虑，0不考虑
+Antenna.AmpPhaseErr = AmpPhaseErr;
+%% 建立目标信息、平台信息（使用矢量速度，极坐标系 r-\theta）
+% 目标信息初始化：初始化目标信息极坐标下的速度、距离、RCS参数，支持多目标参数配置
+% target_v_polar1 = {[3,6],[3,6],[-5,7.3],[-2,10]};
+% target_r_polar1 = {[150,-3],[52,-10],[84,-7.2],[36,5]};
+target_v_polar1 = {[-1.3,0],[-3.2,0],[8.33,0]};
+target_r_polar1 = {[35,-1.9],[60,1.9],[100,3]};
+
+%target_v_polar1 = {[1.3,0]};
+%target_r_polar1 = {[35,-1.9]};
+% zabo_v_polar2 = {[0,0]};
+% zabo_r_polar2 = {[100,5]};
+target_v_polar = [target_v_polar1];% zabo_v_polar2];
+target_r_polar = [target_r_polar1];
+target_rcs = [100 100 100];    %目标的RCS初始化
+
+% 平台信息初始化：输入本车雷达的速度、距离信息
+plat_v_polar = {[6,0]};         %{[16.7,0]}; 
+plat_r_polar = {[0 0]};         %以雷达平台为原点，建立坐标系
+
+% 干扰雷达信息初始化：输入干扰雷达的速度、距离信息，支持多干扰雷达参数配置
+%Jam_v_polar = {[8.33,0],[-8.33,-180]};   %干扰雷达位置信息，干扰雷达的波形参数在func_signal_para参数列表内
+%Jam_r_polar = {[120 5],[30 3.8]}; 
+
+Jam_v_polar = {[-6.4,0],[5,0]};   %干扰雷达位置信息，干扰雷达的波形参数在func_signal_para参数列表内
+Jam_r_polar = {[100 5],[20 3.8]}; 
+
+
+% % % 场景3 多目标信息、多干扰雷达
+% target_v_polar1 = {[-16.7,-180],[-16.7,-180],[-16.7,-180],[-16.7,-180]};     %场景3
+% target_r_polar1 = {[30 3.8],[50 2.3],[80 1.4],[100 1.2]};
+% target_v_polar = [target_v_polar1];
+% target_r_polar = [target_r_polar1];
+% target_rcs = [100 100 100 100];
+% 
+% plat_v_polar = {[16.7,0]};  
+% plat_r_polar = {[0 0]};  %以雷达平台为原点，建立坐标系
+% 
+% Jam_v_polar = {[-16.7,-180],[-16.7,-180],[-16.7,-180],[-16.7,-180]};
+% Jam_r_polar = {[30 3.8],[50 2.3],[80 1.4],[100 1.2]};  %以雷达平台为原点，建立坐标系  场景3
+% 
+%% 类处理
+Scene.targetRcs = target_rcs; %建立场景参数矩阵
+Scene.isMultipath = isMultipath;
+Antenna.isSignalNolinear = isSignallinear;
+%% 转化目标、平台、干扰等场景信息坐标
+[Scene] = func_target_plat_geometry(target_v_polar ,target_r_polar,...
+                         plat_v_polar,plat_r_polar,Jam_v_polar,Jam_r_polar,Scene,isJam);
+
+%% 非理想因素：发射方向图、接收方向图、发射功率、调频斜率、中频增益、幅相误差、阵元间距
+[SysPara Antenna] = func_signal_nolinear(Scene,SysPara,Antenna,Choice);
+
+%% 生成多帧数据，测试航迹跟踪程序
+% 初始场景参数信息
+target_r = Scene.target_r;
+target_v = Scene.target_v;
+plat_r = Scene.plat_r;
+plat_v = Scene.plat_v;
+Jam_r = Scene.Jam_r;
+Jam_v = Scene.Jam_v;
+delaytime = zeros(size(Jam_r));  %记录航迹运动时下帧的的起始时间
+Jam_new_frame_delaytime = zeros(size(Jam_r));
+for nn = 1:frame_num
+    nn
+    %% 生成点目标回波信号
+    dis = Antenna.antenna_distance_factor*SysPara.lambda;% 接收天线间距离
+    % 生成点目标回波信号 Tx0 Tx1
+    dis0 = 0;     %第一个发射天线0距离第一个接收天线
+    dis_mimo = [];
+    for m = 1:1:Antenna.Tchannel_num
+        dis_temp  = dis0 + dis*Antenna.Rchannel_num*(m-1);
+        dis_mimo = [dis_mimo dis_temp];                 %设置发射天线坐标
+    end
+    
+    switch Mode
+        case 'SIMO'
+
+            % 生成Tx0发射的回波数据
+            sigRawTx0_signal = func_point_generate(Scene,SysPara,Antenna,target_r-plat_r,target_v-plat_v,dis0);            
+            ppp = sigRawTx0_signal;
+            %加入干扰信号
+            if isJam
+                sigRawTx0_Jam = zeros(size(sigRawTx0_signal));            
+                for ii = 1:numel(Jam_r)%
+                    switch Wave_mode
+                        case 'FMCW'
+                        [sigRawTx0_JamS next_delaytime(ii)]= func_Jam_generate_new(SysPara,Antenna,Jam(ii),Jam_r(ii)-plat_r,Jam_v(ii)-plat_v,dis0,nn,delaytime(ii)); 
+                        case 'triangle' 
+                        [sigRawTx0_JamS next_delaytime(ii)]= func_Jam_generate_new_wave(SysPara,Antenna,Jam(ii),Jam_r(ii)-plat_r,Jam_v(ii)-plat_v,dis0,nn,delaytime(ii));  %修改参数和FMCW模型的参数一样
+                        case 'SF'
+                        [sigRawTx0_JamS next_delaytime(ii)]= func_Jam_generate_new_wave_SF(SysPara,Antenna,Jam(ii),Jam_r(ii)-plat_r,Jam_v(ii)-plat_v,dis0,nn,delaytime(ii)); %在子函数内部更改SF的波形参数，仅支持单干扰
+                        otherwise
+                        disp('没有此干扰类型');
+                    end
+
+                    sigRawTx0_Jam = sigRawTx0_Jam + sigRawTx0_JamS;%
+
+                end
+               sigRawTx0 =  sigRawTx0_signal + 2.5*sigRawTx0_Jam;%
+               delaytime = next_delaytime;
+            else
+               sigRawTx0 = sigRawTx0_signal;
+            end
+            
+            % 加入随机噪声
+            [r c] = size(sigRawTx0(:,:,1));
+            for m = 1:Antenna.Rchannel_num
+                sigNoise(:,:,m) = SysPara.IFG.*wgn(r, c, SysPara.Pn, 50, 'linear', 'real') ;%50ohm,SysPara.PnW,r*c矩阵
+            end
+            
+            sigRawTx_Total =  sigRawTx0 + 3*sigNoise;                %噪声和信号叠加;% % 
+          % sigRawTx_Total = sigRawTx0; %不添加噪声
+            % 修改目标信息
+             target_r = target_r + target_v.*SysPara.frame_time;  %假设本车雷达和干扰雷达匀速运动
+             plat_r = plat_r + plat_v*SysPara.frame_time;
+             Jam_r = Jam_r + Jam_v.*SysPara.frame_time;
+        case 'MIMO'
+
+            % 生成多发射的回波数据  干扰雷达只考虑FMCW模型
+            
+                for ii = 1:1:Antenna.Tchannel_num               %发射天线个数,生成多发射多接收信号
+                    sigRawTx0_signal{ii} = func_point_generate(Scene,SysPara,Antenna,target_r + target_v*(SysPara.prt*(ii-1)) - (plat_r + plat_v*(SysPara.prt*(ii-1)) ),...,
+                        target_v-plat_v,dis_mimo(ii));
+                end
+                
+             % 生成多发射的回波数据  干扰雷达只考虑FMCW模型 
+             if isJam
+                 sigRawTx0_Jam_temp = zeros(size(sigRawTx0_signal{1}));          
+                 for ii = 1:1:Antenna.Tchannel_num              %发射天线个数,生成多发射多接收信号 
+                       for  ll = 1:numel(Jam_r)%
+                          [sigRawTx0_JamS next_delaytime(ll)] = func_Jam_generate_new(SysPara,Antenna,Jam(ll),Jam_r + Jam_v*(SysPara.prt*(ii-1)) - (plat_r + plat_v*(SysPara.prt*(ii-1)) ),...,
+                                Jam_v-plat_v,dis_mimo(ii),(2*nn-1)+(ii-1),delaytime(ll));
+
+                          sigRawTx0_Jam_temp = sigRawTx0_Jam_temp + sigRawTx0_JamS;%
+                       end
+                       sigRawTx0_Jam{ii} = sigRawTx0_Jam_temp;
+               
+                       sigRawTx0{ii} = sigRawTx0_signal{ii} + sigRawTx0_Jam{ii};     
+                       delaytime = next_delaytime;
+                 end
+             else
+                  sigRawTx0 = sigRawTx0_signal;
+             end
+            
+            % 数据重排
+            sigRawTx0_reorder = zeros(size(sigRawTx0{1}).*[Antenna.Tchannel_num,1,1]);
+            for ii = 1:Antenna.Tchannel_num
+                sigRawTx0_reorder(ii:Antenna.Tchannel_num:end,:,:) = sigRawTx0{ii}(:,:,:);
+            end
+            SysPara.prt_num = SysPara.prt_num*2;
+            % 加入随机噪声
+            [r c] = size(sigRawTx0_reorder(:,:,1));
+            for m = 1:Antenna.Rchannel_num
+                sigNoise(:,:,m) = SysPara.IFG.*wgn(r, c, SysPara.Pn, 50, 'linear', 'real') ;%50ohm,SysPara.PnW,r*c矩阵
+            end
+            
+            sigRawTx_Total =  sigRawTx0_reorder + sigNoise; 
+           %修改目标信息
+            target_r = target_r + target_v.*Antenna.Tchannel_num*SysPara.frame_time;  %假设本车雷达和干扰雷达匀速运动
+            plat_r = plat_r + plat_v*Antenna.Tchannel_num*SysPara.frame_time;
+            Jam_r = Jam_r + Jam_v.*Antenna.Tchannel_num*SysPara.frame_time;
+        otherwise
+            disp('没有此发射模式');
+        
+    end
+    % figure
+    %spectrogram(sigRawTx0(1,:,1),128,128-1,2048,fs,'yaxis')
+    %keyboard
+    % xiaobo(fs,sigRawTx0(1,:,1),2);
+    %tfrstft(sigRawTx0(1,:,1)');
+   sigRawTx0_Jam = sigRawTx0_Jam + sigNoise;
+    
+    %% 低通滤波
+    for m = 1:Antenna.Rchannel_num
+        for n = 1:SysPara.prt_num
+             sigRawTx_Total_LPF(n,:,m) = filter(AD_LPF_100_625MHz,1,sigRawTx_Total(n,:,m));  %对模拟信号低通滤波，截止频率6.25MHz
+             sigRawTx0_Jam_LPF(n,:,m) = filter(AD_LPF_100_625MHz,1,sigRawTx0_Jam(n,:,m));
+             ppp_LPF(n,:,m) = filter(AD_LPF_100_625MHz,1,ppp(n,:,m));
+        end
+    end
+
+    %% AD，8抽
+    D_cpi = Antenna.Tchannel_num;
+    sigRawTx(:,:,:) = sigRawTx_Total_LPF(:,1:8:end,:); 
+    sigRawTx0_Jammm(:,:,:) = sigRawTx0_Jam_LPF(:,1:8:end,:);
+    %sigRawTx(:,:,:) = sigRawTx_Total(:,1:8:end,:);
+    ppp_AD(:,:,:) = ppp_LPF(:,1:8:end,:);
+    
+    %% 生成多帧数据
+    
+    SigRawTx_frame{nn} = sigRawTx;  %记录帧数
+    jam_frame{nn} = sigRawTx0_Jammm;
+    ppp_frame{nn} = ppp_AD;
+   
+    
+    %画图
+    if 0
+    aa = sigRawTx_Total(1,:,1);
+    bb = sigRawTx_Total_LPF(1,:,1);
+    cc = sigRawTx(1,:,1);
+    dd = sigRawTx0_signal(1,:,1);
+    ee = sigRawTx0_Jammm(1,:,1);
+    aa_fft = fftshift(fft(aa,8192));
+    bb_fft = fftshift(fft(bb,8192));
+    cc_fft = fftshift(fft(cc,8192));
+    dd_fft = fftshift(fft(dd,8192));
+    ee_fft = fftshift(fft(ee,8192));
+    xx = linspace(-fs/2,fs/2,8192)./1e6;
+    xx1 = linspace(-fs/2/8,fs/2/8,8192)./1e6;
+    figure
+    subplot(4,1,1)
+    plot(xx,db(aa_fft));grid on;title('回波信号')
+    subplot(4,1,2)
+    plot(xx,db(bb_fft));grid on;title('低通滤波后')
+    subplot(4,1,3)
+    plot(xx1,db(cc_fft));grid on;title('AD后')
+    subplot(4,1,4)
+    plot(xx,db(dd_fft));grid on;title('信号')
+    
+    figure
+    plot(xx1,db(ee_fft));grid on;title('干扰信号')
+    
+    if 0
+    figure
+    aaa = sigRawTx(1,:,1);
+    Rfftn = 512;
+    t=linspace(0,25,625);
+    aaa_fft = fftshift(fft(aaa,Rfftn));
+    %aaa_fft = [zeros(1,256),aaa_fft(Rfftn/2+1:Rfftn)];
+    xxx = SysPara.up_time/SysPara.band*3e8/2*SysPara.fs/8/2/(Rfftn/2)*(0:Rfftn/2-1);
+    xxx = -255:256;
+    subplot(311)
+    plot(t,real(aaa));grid on;xlabel('t/us');ylabel('幅度');title('(a)')
+    subplot(312)
+    plot(xxx,real(aaa_fft));grid on;xlabel('FFT Bin');ylabel('幅度');title('(b)')
+    subplot(313)
+    plot(xxx,imag(aaa_fft));grid on;xlabel('FFT Bin');ylabel('幅度');title('(c)')
+    end
+    
+    
+    end
+    % 计算干燥比
+    if 0
+    interferedata = mean(mean(mean(abs(sigRawTx0_signal).^2)));%对信号功率就平均
+    noisedata = mean(mean(mean(abs(sigRawTx0_Jam).^2)));     %对干扰功率求平均    
+    INR = db(noisedata/interferedata)/2;
+     disp(['信干比为：',num2str(INR),'dB'])
+    %figure;
+    %subplot(2,1,1)
+    %plot(sigRawTx0(1,:,1));grid on 
+    %xlabel('采样点');ylabel('幅度');title('dechirp后一个prt的干扰信号')
+    %subplot(2,1,2)
+    %plot(sigNoise(1,:,1));grid on 
+    %xlabel('采样点');ylabel('幅度');title('一个prt的噪声信号')
+    end
+    clear sigRawTx sigRawTx0_signal sigRawTx0_Jam sigRawTx_Total_LPF
+end
+save echo SigRawTx_frame 
+save para SysPara Antenna
+
+%keyboard
+%% 测角单一发射天线处理结果 调试画图
+switch Mode
+    case 'SIMO'
+    Vfftn = 512;
+    Rfftn = 1024;
+    AngleNum = 512;
+    SigRawTx = SigRawTx_frame{1};
+   %figure('windowstyle','docked')
+    [M N] = size(SigRawTx(:,:,1));
+    win = hamming(M)*hamming(N).';
+    %for ii = 1:Antenna.Rchannel_num
+    %subplot(2,4,ii)
+    %fft_r_v  = fft2(SigRawTx(:,:,ii).*win,Vfftn,Rfftn);%
+    %ttp1(:,:,ii) = fft_r_v(:,1:Rfftn/2);
+    %imagesc(db(ttp1(:,:,ii)))
+    %end
+    
+    Rx =  SysPara.up_time/SysPara.band*3e8/2*SysPara.fs/8/2/(Rfftn/2)*(0:Rfftn/2-1);
+    Vx = SysPara.lambda*SysPara.prf/2*((0:Vfftn-1)-Vfftn/2)/Vfftn;
+    %Vx = SysPara.lambda*SysPara.prf/2*((0:256*3-1)-256*3/2)/256/3;
+    AngleNum = AngleNum;
+    Ax = asind( ((0 : (AngleNum - 1)) - AngleNum/2) /AngleNum *SysPara.lambda/(0.6*SysPara.lambda) );
+   
+    % 画距离FFT频谱图
+    data = SigRawTx(:,:,1);
+    data = data.*win;
+    jam = sigRawTx0_Jammm(:,:,1);
+    jam = jam.*win;
+    figure
+    fft_r_v  = fft2(data,Vfftn,Rfftn);%
+    ttp1 = fft_r_v(:,1:Rfftn/2);
+    imagesc(Rx,Vx,db(fftshift(ttp1,1))/2)
+    xlabel('距离(m)')
+    ylabel('速度(m/s)')
+    title('距离-多普勒平面成像结果')
+    figure
+    mesh(Rx,Vx,db(fftshift(ttp1,1))/2)
+    xlabel('距离(m)')
+    ylabel('速度(m/s)')
+    zlabel('幅度（dB）')
+    %距离FFT
+    for k = 1:1:Vfftn
+        datafft(k,:) =fftshift(fft(data(k,:),Rfftn));
+        jamfft(k,:) = fftshift(fft(jam(k,:),Rfftn));
+    end
+    pos = datafft(1,Rfftn/2+1:Rfftn);
+    neg = jamfft(1,1:Rfftn/2);
+
+    %滤波前
+    figure
+    plot(Rx,db(pos)/2);grid on;hold on;xlabel('距离(m))');ylabel('幅度(dB)'); title('正半轴'),axis([0,350,0,50]);
+    figure
+    %subplot(3,1,1)
+    %plot(Rx,db(flip(neg))/2);grid on;hold on;xlabel('距离(m)');ylabel('幅度(dB)');title('负半轴'),axis([0,350,0,50]);%正半轴；
+    subplot(2,1,1)
+    plot(Rx,db(pos)/2);grid on;hold on;xlabel('距离(m))');ylabel('幅度(dB)'); title('正半轴'),axis([0,350,0,50]);%负半轴
+    
+    
+    %自适应滤波
+    M1 = 1 %Vfftn;
+    N1 = Rfftn;
+    L = 20;     %自适应滤波器长度
+    T = 0;
+    gamma = 100; %迭代步长
+    for i=1:1:M1
+        y = datafft(i,:);
+        pri = pos;%y(N1/2+1:N1);        %正半部分
+        %共轭对称
+        ref = conj(flip(neg));%conj(flip(y(1:N1/2)));
+        P=sum(ref.^2);
+        %if P>T
+        %初始化参数
+        fi = zeros(N1/2,1);            %输入
+        wo = [1;zeros(L-1,1)];         %滤波器系数
+        e = zeros(N1/2,1);             %误差
+        deltaw = 2/gamma/P;        %步长
+        %迭代求解
+            for j = 1:N1/2
+                fi = [ref(j);fi(1:L-1)]; 
+                fo = wo.' * fi;
+                e(j) = pri(j) - fo;
+                wo = wo + deltaw*fi*e(j);     
+            end
+            OUT(i,:)= e';
+            
+            %subplot(3,1,3);plot(db(e));title('滤波后');
+            %keyboard
+            %keyboard
+        %else
+            %OUT(i,:)=pri';
+        %end
+    end
+   subplot(2,1,2)
+   plot(Rx,db(OUT(1,:))/2);grid on;hold on;xlabel('距离(m)');ylabel('幅度(dB)');title('滤波后') %正半轴
+   %axis([0,350,0,50]);
+    p1 = db(mean(pos))/2
+    p2 = db(mean(OUT(1,:)))/2
+    
+    
+case 'MIMO'
+    Vfftn = 256;
+    Rfftn = 1024;
+    AngleNum = 1024;
+    SigRawTx = SigRawTx_frame{1};
+    
+    SigRawTx1 = SigRawTx(1:2:end,:,:);
+    SigRawTx2 = SigRawTx(2:2:end,:,:);
+    [M N] = size(SigRawTx1(:,:,1));
+    win = hamming(M)*hamming(N).';
+    for ii = 1:Antenna.Rchannel_num
+    fftout_T1  = fft2(SigRawTx1(:,:,ii).*win,Vfftn,Rfftn);
+    fftout_T2  = fft2(SigRawTx2(:,:,ii).*win,Vfftn,Rfftn);
+    fftout_TX1(:,:,ii) = fftshift(fftout_T1(:,1:Rfftn/2),1);
+    fftout_TX2(:,:,ii) = fftshift(fftout_T2(:,1:Rfftn/2),1);
+    end
+    
+    figure
+    subplot(1,2,1)
+    imagesc(db(fftout_TX1(:,:,1)))
+    subplot(1,2,2)
+    imagesc(db(fftout_TX2(:,:,1)))
+    
+    %从发射1通道获得的速度信息去补偿发射2通道的延迟速度位移
+    Rx =  SysPara.up_time/SysPara.band*3e8/2*SysPara.fs/8/(Rfftn)*(0:Rfftn/2-1);
+    Vx = SysPara.lambda*SysPara.prf/2*((0:Vfftn-1)-Vfftn/2)/Vfftn;
+    Ax = asind( ((0 : (AngleNum - 1)) - AngleNum/2) /AngleNum *SysPara.lambda/(0.6*SysPara.lambda) );
+    figure
+    imagesc(Rx,Vx,db((fftout_TX1(:,:,1))))
+    xlabel('距离')
+    ylabel('速度')
+    figure
+    imagesc(Rx,Vx,db((fftout_TX2(:,:,1))))
+    xlabel('距离（m）')
+    ylabel('速度（m/s）')
+    
+    % 速度补偿,当存在速度模糊的时候,需要先解速度模糊,再进行2发射的速度补偿
+    x = 173;
+    y = 50;
+    % 速度信息补偿  
+    Vxx = Vx;
+    H11 = exp(-1j*2*pi*(2*Vxx.'/SysPara.lambda)*SysPara.prt); %目标远离为负，近为正
+    H1 = repmat(H11,1,Rfftn/2);
+    for ii = 1:Antenna.Rchannel_num
+        temp_TX2(:,:,ii) = fftout_TX2(:,:,ii).*H1;
+    end
+    temp_TX22 = temp_TX2(x,y,:);
+    t2 = fftshift(fft(temp_TX22(:),AngleNum));
+
+    temp_TX11 = fftout_TX1(x,y,:);
+    t1 = fftshift(fft(temp_TX11(:),AngleNum));
+    
+    data_uini(:,:,1:Antenna.Rchannel_num) = fftout_TX1;
+    data_uini(:,:,Antenna.Rchannel_num+1:16) = temp_TX2;
+    angle_temp = data_uini(x,y,:);
+    
+    t3 = fftshift(fft(angle_temp(:),AngleNum));
+   
+    figure
+    subplot(3,1,1)
+    plot(Ax,abs(t1));grid on
+    xlabel('角度(°)');
+    ylabel('幅度/TX1');
+    
+    subplot(3,1,2)
+    plot(Ax,abs(t2));grid on
+    xlabel('角度(°)');
+    ylabel('幅度/TX2');
+    
+    subplot(3,1,3)
+    plot(Ax,abs(t3));grid on
+    xlabel('角度(°)');
+    ylabel('幅度/MIMO');
+    
+    figure
+    subplot(3,1,1)
+    plot(Rx,db(fftout_TX1(x,:,1)));grid on;hold on;xlabel('距离(m)');ylabel('幅度(dB)')
+    subplot(3,1,2)
+    plot(Vx,db(fftout_TX1(:,y,1)));grid on;hold on;xlabel('速度(m/s)');ylabel('幅度(dB)')
+    subplot(3,1,3)
+    plot(Ax,abs(t3));grid on;
+    xlabel('角度(°)');ylabel('幅度')
+
+end
+%keyboard
+if 0
+fs=100;
+T=50;
+B=300;
+k=B/T;%调频斜率
+n=round(T*fs);%采样点个数
+t=linspace(0,T,n);
+y=5*exp(1j*pi*k*t.^2);%LFM信号
+fs1=100;
+T1=50;
+B1=50;
+k1=B1/T1;%调频斜率
+n1=round(T1*fs1);%采样点个数
+t1=linspace(0,T1,n1);
+y1=exp(1j*pi*k1*t1.^2);%LFM信号
+s = y+y1;
+figure
+spectrogram(s,64,64-1,1024,fs,'yaxis');   % B是F大小行T大小列的频率峰值，P是对应的能量谱密度
+xlabel('时间/10^-7s');
+ylabel('频率/MHz');
+end
